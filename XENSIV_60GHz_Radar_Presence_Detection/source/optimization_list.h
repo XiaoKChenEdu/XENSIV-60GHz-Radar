@@ -85,17 +85,23 @@ typedef struct {
     uint32_t fifo_limit;
 }optimization_s;
 
-optimization_s optimizations_list [] = {
+#define OPTIMIZATION_LIST_COUNT (2U)
+
+#ifdef OPTIMIZATION_LIST_DEFINE
+optimization_s optimizations_list[OPTIMIZATION_LIST_COUNT] = {
         {
                 register_list_macro_only,
                 XENSIV_BGT60TRXX_CONF_NUM_REGS_MACRO,
-                NUM_SAMPLES_PER_FRAME*2
+                NUM_SAMPLES_PER_FRAME * 2U
         },
         {
                 register_list_micro_only,
                 XENSIV_BGT60TRXX_CONF_NUM_REGS_MICRO,
-                NUM_SAMPLES_PER_FRAME*2
+                NUM_SAMPLES_PER_FRAME * 2U
         }
 };
+#else
+extern optimization_s optimizations_list[OPTIMIZATION_LIST_COUNT];
+#endif
 
 #endif /* SOURCE_OPTIMIZATION_LIST_H_ */

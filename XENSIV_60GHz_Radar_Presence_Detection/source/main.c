@@ -36,6 +36,7 @@
 * so agrees to indemnify Cypress against all liability.
 *******************************************************************************/
 
+#if 0
 #include <inttypes.h>
 #include <stdio.h>
 
@@ -767,3 +768,232 @@ static void timer_callbak(TimerHandle_t xTimer)
 }
 
 /* [] END OF FILE */
+#endif /* Legacy presence-detection application disabled */
+
+#include <inttypes.h>
+#include <stdio.h>
+
+#include "cy_pdl.h"
+#include "cyhal.h"
+#include "cybsp.h"
+#include "cy_retarget_io.h"
+
+#include "FreeRTOS.h"
+#include "task.h"
+
+#include "xensiv_bgt60trxx.h"
+#include "xensiv_bgt60trxx_mtb.h"
+
+#include "radar_device_config.h"
+#include "radar_low_framerate_config.h"
+#include "resource_map.h"
+#include "angle_range.h"
+
+#define RADAR_TASK_STACK_SIZE   (configMINIMAL_STACK_SIZE * 16U)
+#define RADAR_TASK_PRIORITY     (tskIDLE_PRIORITY + 2U)
+
+#define RAW_SAMPLES_PER_FRAME   (XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP * \
+                                 XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME * \
+                                 XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS * 2U)
+
+#define GPIO_INTERRUPT_PRIORITY (7U)
+
+static cyhal_spi_t spi_obj;
+static xensiv_bgt60trxx_mtb_t radar_dev;
+static TaskHandle_t radar_task_handle;
+
+static uint16_t raw_frame[RAW_SAMPLES_PER_FRAME];
+static float32_t frame_buffer[RAW_SAMPLES_PER_FRAME];
+
+static void radar_task(void *arg);
+static cy_rslt_t init_sensor(void);
+static bool acquire_frame(void);
+
+#if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
+static void radar_irq_handler(void *args, cyhal_gpio_event_t event);
+#else
+static void radar_irq_handler(void *args, cyhal_gpio_irq_event_t event);
+#endif
+
+int main(void)
+{
+    cy_rslt_t result = cybsp_init();
+
+    if (result != CY_RSLT_SUCCESS)
+    {
+        printf("[ERR] BSP init failed: 0x%08" PRIX32 "\r\n", (uint32_t)result);
+        CY_ASSERT(0);
+    }
+
+    __enable_irq();
+
+    cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
+    printf("\r\nXENSIV 60GHz Radar AoA demo\r\n");
+
+    if (xTaskCreate(radar_task,
+                    "radar",
+                    RADAR_TASK_STACK_SIZE,
+                    NULL,
+                    RADAR_TASK_PRIORITY,
+                    &radar_task_handle) != pdPASS)
+    {
+        printf("[ERR] Failed to create radar task\r\n");
+        CY_ASSERT(0);
+    }
+
+    vTaskStartScheduler();
+    CY_ASSERT(0);
+    return 0;
+}
+
+static void radar_task(void *arg)
+{
+    (void)arg;
+
+    radar_task_handle = xTaskGetCurrentTaskHandle();
+
+    printf("Initializing radar...\r\n");
+
+    if (init_sensor() != CY_RSLT_SUCCESS)
+    {
+        printf("[ERR] Sensor init failed\r\n");
+        CY_ASSERT(0);
+    }
+
+    printf("Radar ready. Streaming range and angles.\r\n");
+
+    for (;;)
+    {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        if (!acquire_frame())
+        {
+            printf("[WARN] Failed to read frame\r\n");
+            continue;
+        }
+
+        angle_range_result_t result;
+
+        if (angle_range_compute(frame_buffer, &result))
+        {
+            angle_range_print(&result, true);
+        }
+        else
+        {
+            printf("[INFO] No dominant target detected\r\n");
+        }
+    }
+}
+
+static cy_rslt_t init_sensor(void)
+{
+    if (cyhal_spi_init(&spi_obj,
+                       PIN_XENSIV_BGT60TRXX_SPI_MOSI,
+                       PIN_XENSIV_BGT60TRXX_SPI_MISO,
+                       PIN_XENSIV_BGT60TRXX_SPI_SCLK,
+                       NC,
+                       NULL,
+                       8,
+                       CYHAL_SPI_MODE_00_MSB,
+                       false) != CY_RSLT_SUCCESS)
+    {
+        return CY_RSLT_TYPE_ERROR;
+    }
+
+    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                        CY_GPIO_SLEW_FAST);
+    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI),
+                        CY_GPIO_DRIVE_1_8);
+    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                        CY_GPIO_SLEW_FAST);
+    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                        CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK),
+                        CY_GPIO_DRIVE_1_8);
+
+    if (cyhal_spi_set_frequency(&spi_obj, 25000000UL) != CY_RSLT_SUCCESS)
+    {
+        return CY_RSLT_TYPE_ERROR;
+    }
+
+#if defined (TARGET_APP_CYSBSYSKIT_DEV_01) || defined (TARGET_APP_KIT_BGT60TR13C_EMBEDD)
+    if (cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_LDO_EN,
+                        CYHAL_GPIO_DIR_OUTPUT,
+                        CYHAL_GPIO_DRIVE_STRONG,
+                        true) != CY_RSLT_SUCCESS)
+    {
+        return CY_RSLT_TYPE_ERROR;
+    }
+#endif
+
+    cyhal_system_delay_ms(5U);
+
+    cy_rslt_t rslt = xensiv_bgt60trxx_mtb_init(&radar_dev,
+                                               &spi_obj,
+                                               PIN_XENSIV_BGT60TRXX_SPI_CSN,
+                                               PIN_XENSIV_BGT60TRXX_RSTN,
+                                               register_list_macro_only,
+                                               XENSIV_BGT60TRXX_CONF_NUM_REGS_MACRO);
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        return rslt;
+    }
+
+    rslt = xensiv_bgt60trxx_set_fifo_limit(&radar_dev.dev, RAW_SAMPLES_PER_FRAME);
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        return rslt;
+    }
+
+    rslt = xensiv_bgt60trxx_mtb_interrupt_init(&radar_dev,
+                                               RAW_SAMPLES_PER_FRAME,
+                                               PIN_XENSIV_BGT60TRXX_IRQ,
+                                               GPIO_INTERRUPT_PRIORITY,
+                                               radar_irq_handler,
+                                               radar_task_handle);
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        return rslt;
+    }
+
+    if (xensiv_bgt60trxx_start_frame(&radar_dev.dev, true) != CY_RSLT_SUCCESS)
+    {
+        return CY_RSLT_TYPE_ERROR;
+    }
+
+    return CY_RSLT_SUCCESS;
+}
+
+static bool acquire_frame(void)
+{
+    if (xensiv_bgt60trxx_get_fifo_data(&radar_dev.dev,
+                                       raw_frame,
+                                       RAW_SAMPLES_PER_FRAME) != XENSIV_BGT60TRXX_STATUS_OK)
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0U; i < RAW_SAMPLES_PER_FRAME; ++i)
+    {
+        frame_buffer[i] = ((float32_t)raw_frame[i]) / 4096.0f;
+    }
+
+    return true;
+}
+
+#if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
+static void radar_irq_handler(void *args, cyhal_gpio_event_t event)
+#else
+static void radar_irq_handler(void *args, cyhal_gpio_irq_event_t event)
+#endif
+{
+    (void)event;
+
+    TaskHandle_t task = (TaskHandle_t)args;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+
+    vTaskNotifyGiveFromISR(task, &higher_priority_task_woken);
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+}
