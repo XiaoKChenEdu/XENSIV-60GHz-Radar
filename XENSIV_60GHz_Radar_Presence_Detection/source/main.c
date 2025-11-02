@@ -1,785 +1,17 @@
-/* ***************************************************************************
-** File name: main.c
-**
-** Description: This is the main file for PSOC6 Radar Presence Code Example.
-**
-*******************************************************************************
-* Copyright 2025, Cypress Semiconductor Corporation (an Infineon company) or
-* an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
-*
-* This software, including source code, documentation and related
-* materials ("Software") is owned by Cypress Semiconductor Corporation
-* or one of its affiliates ("Cypress") and is protected by and subject to
-* worldwide patent protection (United States and foreign),
-* United States copyright laws and international treaty provisions.
-* Therefore, you may use this Software only as provided in the license
-* agreement accompanying the software package from which you
-* obtained this Software ("EULA").
-* If no EULA applies, Cypress hereby grants you a personal, non-exclusive,
-* non-transferable license to copy, modify, and compile the Software
-* source code solely for use in connection with Cypress's
-* integrated circuit products.  Any reproduction, modification, translation,
-* compilation, or representation of this Software except as specified
-* above is prohibited without the express written permission of Cypress.
-*
-* Disclaimer: THIS SOFTWARE IS PROVIDED AS-IS, WITH NO WARRANTY OF ANY KIND,
-* EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, NONINFRINGEMENT, IMPLIED
-* WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. Cypress
-* reserves the right to make changes to the Software without notice. Cypress
-* does not assume any liability arising out of the application or use of the
-* Software or any product or circuit described in the Software. Cypress does
-* not authorize its products for use in any products where a malfunction or
-* failure of the Cypress product may reasonably be expected to result in
-* significant property damage, injury or death ("High Risk Product"). By
-* including Cypress's product in a High Risk Product, the manufacturer
-* of such system or application assumes all risk of such use and in doing
-* so agrees to indemnify Cypress against all liability.
-*******************************************************************************/
-
-#if 0
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "cy_pdl.h"
 #include "cyhal.h"
 #include "cybsp.h"
 #include "cy_retarget_io.h"
+#include "cyhal_uart.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
-#include "timers.h"
-
-#include "cli_task.h"
-#include "resource_map.h"
-#include "xensiv_bgt60trxx_mtb.h"
-#include "xensiv_radar_presence.h"
-#include "radar_config_optimizer.h"
-
-#include "radar_low_framerate_config.h"
-#include "radar_high_framerate_config.h"
-
-#define XENSIV_RADAR_PRESENCE_SETTINGS_H_IMPL
-#include "presence_settings.h"
-
-#include "xensiv_radar_data_management.h"
-#include "optimization_list.h"
-
-/*******************************************************************************
-* Macros
-********************************************************************************/
-#define XENSIV_BGT60TRXX_SPI_FREQUENCY      (25000000UL)
-
-/* RTOS tasks */
-#define MAIN_TASK_NAME                      "main_task"
-#define MAIN_TASK_STACK_SIZE                (configMINIMAL_STACK_SIZE * 4)
-#define MAIN_TASK_PRIORITY                  (configMAX_PRIORITIES - 2)
-#define PROCESSING_TASK_NAME                "processing_task"
-#define PROCESSING_TASK_STACK_SIZE          (configMINIMAL_STACK_SIZE * 4)
-#define PROCESSING_TASK_PRIORITY            (configMAX_PRIORITIES - 3)
-#define CLI_TASK_NAME                       "cli_task"
-#define CLI_TASK_STACK_SIZE                 (configMINIMAL_STACK_SIZE * 20)
-#define CLI_TASK_PRIORITY                   (tskIDLE_PRIORITY)
-
-/* Interrupt priorities */
-#define GPIO_INTERRUPT_PRIORITY             (7)
-
-
-/*******************************************************************************
-* Function Prototypes
-********************************************************************************/
-static void main_task(void *pvParameters);
-static void processing_task(void *pvParameters);
-static void timer_callbak(TimerHandle_t xTimer);
-
-static int32_t init_leds(void);
-static int32_t init_sensor(void);
-static void process_verbose_cmd(xensiv_radar_presence_handle_t handle, XENSIV_RADAR_PRESENCE_TIMESTAMP time_ms);
-static void xensiv_bgt60trxx_interrupt_handler(void* args, cyhal_gpio_event_t event);
-void presence_detection_cb(xensiv_radar_presence_handle_t handle,
-                           const xensiv_radar_presence_event_t* event,
-                           void *data);
-void print_welcome_message(xensiv_bgt60trxx_device_t device_type);
-
-/*******************************************************************************
- * Local Declarations
- ********************************************************************************/
-
-typedef struct {
-    xensiv_radar_presence_event_t last_reported_event;
-    bool verbose;
-    XENSIV_RADAR_PRESENCE_TIMESTAMP bookmark_timestamp;
-}ce_state_s;
-
-
-/*******************************************************************************
-* Global Variables
-********************************************************************************/
-static cyhal_spi_t spi_obj;
-static xensiv_bgt60trxx_mtb_t bgt60_obj;
-float32_t frame[NUM_SAMPLES_PER_FRAME * 2];
-static float32_t avg_chirp[NUM_SAMPLES_PER_CHIRP];
-
-static TaskHandle_t main_task_handler;
-static TaskHandle_t processing_task_handler;
-static TimerHandle_t timer_handler;
-radar_data_manager_s mgr;
-
-ce_state_s ce_app_state;
-
-volatile bool print_job_locked;
-
-/*******************************************************************************
-* Function Name: read_radar_data
-********************************************************************************
-* Summary:
-* This is the function for reading radar data using buffering
-*
-* Parameters:
-*  * data: pointer to radar data
-*  *num_samples: pointer to number of samples per frame
-*  samples_ub: maximum number of samples to be copied at a time from owner task/caller
-*
-* Return:
-*  int32_t: 0 if success
-*
-*******************************************************************************/
-int32_t read_radar_data(uint16_t* data, uint32_t *num_samples, uint32_t samples_ub)
-{
-    if (xensiv_bgt60trxx_get_fifo_data(&bgt60_obj.dev,
-            data,
-            NUM_SAMPLES_PER_FRAME) == XENSIV_BGT60TRXX_STATUS_OK)
-    {
-        *num_samples = NUM_SAMPLES_PER_FRAME *2; // in bytes
-
-        if (samples_ub < NUM_SAMPLES_PER_FRAME *2)
-        {
-            xensiv_bgt60trxx_soft_reset(&bgt60_obj.dev,XENSIV_BGT60TRXX_RESET_FIFO );
-        }
-    }
-
-    return 0;
-}
-
-/*******************************************************************************
-* Function Name: reconf_radar
-********************************************************************************
-* Summary:
-* This is the function for radar reconfiguration
-*
-* Parameters:
-*  requested: Choosed configuration
-*
-* Return:
-*  void
-*
-*******************************************************************************/
-void reconf_radar(optimization_type_e requested)
-{
-    if (requested == CONFIG_UNINITIALIZED)
-    {
-        return;
-    }
-
-    if (xensiv_bgt60trxx_config(&bgt60_obj.dev,
-            optimizations_list[requested].reg_list,
-            optimizations_list[requested].reg_list_size) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: xensiv_bgt60trxx reconfiguration failed\n");
-        CY_ASSERT(0);
-    }
-
-    if (xensiv_bgt60trxx_set_fifo_limit(&bgt60_obj.dev,
-            optimizations_list[requested].fifo_limit) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: xensiv_bgt60trxx set fifo limit failed\n");
-        CY_ASSERT(0);
-    }
-
-    if (xensiv_bgt60trxx_start_frame(&bgt60_obj.dev, true) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: xensiv_bgt60trxx_start_frame failed\n");
-        CY_ASSERT(0);
-    }
-}
-
-
-/*******************************************************************************
-* Function Name: main
-********************************************************************************
-* Summary:
-* This is the main function for CM4 CPU. It initializes BSP, creates FreeRTOS
-* main task and starts the scheduler.
-*
-* Parameters:
-*  void
-*
-* Return:
-*  int
-*
-*******************************************************************************/
-int main(void)
-{
-    cy_rslt_t result;
-
-    /* Initialize the device and board peripherals */
-    result = cybsp_init() ;
-    if (result != CY_RSLT_SUCCESS)
-    {
-        CY_ASSERT(0);
-    }
-
-    /* Enable global interrupts */
-    __enable_irq();
-
-    /* Initialize retarget-io to use the debug UART port */
-    cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
-
-#ifdef TARGET_APP_CYSBSYSKIT_DEV_01
-
-    /* Initialize the User LED */
-    cyhal_gpio_init(CYBSP_USER_LED, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, CYBSP_LED_STATE_OFF);
-
-#endif
-
-    mgr.in_read_radar_data = read_radar_data;
-    radar_data_manager_init(&mgr, NUM_SAMPLES_PER_FRAME *6, NUM_SAMPLES_PER_FRAME *2);
-    radar_data_manager_set_malloc_free(pvPortMalloc,
-            vPortFree);
-
-    /* Create the RTOS task */
-    if (xTaskCreate(main_task, MAIN_TASK_NAME, MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handler) != pdPASS)
-    {
-        CY_ASSERT(0);
-    }
-
-    /* Start the FreeRTOS scheduler. */
-    vTaskStartScheduler();
-
-    CY_ASSERT(0);
-}
-
-void print_welcome_message(xensiv_bgt60trxx_device_t device_type)
-{
-    /* \x1b[2J\x1b[;H - ANSI ESC sequence for clear screen */
-    printf("\x1b[2J\x1b[;H");
-
-    if(device_type != CONNECTED_RADAR_DEVICE)
-    {
-        printf("****************** "
-               "Radar presence"
-               "****************** \r\n\n"
-               "Radar device detected does not match defined radar configurations. \r\n"
-               "Please change radar configurations in radar_device_config.h \r\n"
-               );
-        CY_ASSERT(0);
-    }
-    else
-    {
-        switch(device_type)
-        {
-            case XENSIV_DEVICE_BGT60TR13C:
-                printf("****************** "
-                        "Radar presence"
-                        "****************** \r\n\n"
-                        "XENSIV 60 GHz Radar Presence Detection\r\n"
-                        );
-                printf("Press ENTER to enter setup mode, press ESC to quit setup mode \r\n");
-            break;
-
-            case XENSIV_DEVICE_BGT60UTR11:
-                printf("****************** "
-                    "Radar presence"
-                    "****************** \r\n\n"
-                    "XENSIV 60 GHz Radar Presence Detection\r\n"
-                    );
-                printf("Press ENTER to enter setup mode, press ESC to quit setup mode \r\n");
-            break;
-
-            default:
-                printf("****************** "
-                        "Radar presence"
-                        "****************** \r\n\n"
-                        "Unsupported radar device detected\r\n"
-                        );
-            break;
-        }
-    }
-}
-
-/*******************************************************************************
-* Function Name: main_task
-********************************************************************************
-* Summary:
-* This is the main task.
-*    1. Creates a timer to toggle user LED
-*    2. Create the processing RTOS task
-*    3. Initializes the hardware interface to the sensor and LEDs
-*    4. Initializes the radar device
-*    5. In an infinite loop
-*       - Waits for interrupt from radar device indicating availability of data
-*       - Reads the data, converts it to floating point and notifies the processing task
-* Parameters:
-*  void
-*
-* Return:
-*  none
-*
-*******************************************************************************/
-static __NO_RETURN void main_task(void *pvParameters)
-{
-    (void)pvParameters;
-    uint32_t sz;
-    uint16_t *data_buff = NULL;
-    cy_rslt_t result;
-    XENSIV_RADAR_PRESENCE_TIMESTAMP last_timestamp = 0;
-
-    timer_handler = xTimerCreate("timer", pdMS_TO_TICKS(1000), pdTRUE, NULL, timer_callbak);    
-    if (timer_handler == NULL)
-    {
-        CY_ASSERT(0);
-    }
-
-    if (xTimerStart(timer_handler, 0) != pdPASS)
-    {
-        CY_ASSERT(0);
-    }
-
-    if (xTaskCreate(processing_task, PROCESSING_TASK_NAME, PROCESSING_TASK_STACK_SIZE, NULL, PROCESSING_TASK_PRIORITY, &processing_task_handler) != pdPASS)
-    {
-        CY_ASSERT(0);
-    }
-
-    if (init_sensor() != 0)
-    {
-        CY_ASSERT(0);
-    }
-
-    xensiv_bgt60trxx_device_t device_type = xensiv_bgt60trxx_get_device(&bgt60_obj.dev);
-
-    print_welcome_message(device_type);
-
-    if (init_leds () != 0)
-    {
-        CY_ASSERT(0);
-    }
-
-    mgr.subscribe(main_task_handler);
-
-    /* Initialize the initial state of ce_app_state */
-    ce_app_state.last_reported_event.state = XENSIV_RADAR_PRESENCE_STATE_ABSENCE;
-    ce_app_state.last_reported_event.range_bin = 0;
-    ce_app_state.last_reported_event.timestamp = 0;
-
-    if (xensiv_bgt60trxx_start_frame(&bgt60_obj.dev, true) != XENSIV_BGT60TRXX_STATUS_OK)
-    {
-        CY_ASSERT(0);
-    }
-
-    for(;;)
-    {
-        /* Wait for the GPIO interrupt to indicate that another slice is available */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        mgr.read_from_buffer(1, &data_buff, &sz);
-
-        /* Data preprocessing */
-        uint16_t *bgt60_buffer_ptr = data_buff;
-        float32_t *frame_ptr = &frame[0];
-        for (int32_t sample = 0; sample < NUM_SAMPLES_PER_FRAME * 2; ++sample)
-        {
-            *frame_ptr++ = ((float32_t)(*bgt60_buffer_ptr++) / 4096.0F);
-        }
-
-        mgr.ack_data_read(1);
-
-        /* calculate the average of the chirps first */
-        arm_fill_f32(0, avg_chirp, NUM_SAMPLES_PER_CHIRP);
-
-        for (int chirp = 0; chirp < NUM_CHIRPS_PER_FRAME * 2; chirp++)
-        {
-            arm_add_f32(avg_chirp, &frame[NUM_SAMPLES_PER_CHIRP * chirp], avg_chirp, NUM_SAMPLES_PER_CHIRP);
-        }
-
-        arm_scale_f32(avg_chirp, 1.0f / NUM_CHIRPS_PER_FRAME, avg_chirp, NUM_SAMPLES_PER_CHIRP);
-
-        if(ce_app_state.last_reported_event.timestamp != last_timestamp)
-        {
-            last_timestamp = ce_app_state.last_reported_event.timestamp; // save latest timestamp
-            result = radar_config_optimize(ce_app_state.last_reported_event.state);
-            if(result != ESTATUS_SUCCESS)
-            {
-                printf("[MSG] ERROR: radar_config_optimize failed with error %" PRIi32 "\n", result);
-                CY_ASSERT(0);
-            }
-        }
-
-        /* Tell processing task to take over */
-        xTaskNotifyGive(processing_task_handler);
-
-    }
-}
-
-/*******************************************************************************
-* Function Name: processing_task
-********************************************************************************
-* Summary:
-* This is the data processing task.
-*    1. Initializes the presence sensing library and register an event callback
-*    2. It creates a console task to handle parameter configuration for the library
-*    3. In a loop
-*       - receives notification from main task
-*       - executes the presence algorithm and provides the result on terminal and LEDs
-*
-* Parameters:
-*  void
-*
-* Return:
-*  None
-*
-*******************************************************************************/
-static __NO_RETURN void processing_task(void *pvParameters)
-{
-    (void)pvParameters;
-
-    xensiv_radar_presence_handle_t handle;
-    cy_rslt_t result;
-
-    xensiv_radar_presence_set_malloc_free(pvPortMalloc,
-                                          vPortFree);
-
-    if (xensiv_radar_presence_alloc(&handle, &default_config) != 0)
-    {
-        CY_ASSERT(0);
-    }
-
-    xensiv_radar_presence_set_callback(handle, presence_detection_cb, NULL);
-    result = radar_config_optimizer_init(reconf_radar);
-
-    if(result != ESTATUS_SUCCESS)
-    {
-        printf("[MSG] ERROR: radar_config_optimizer_init failed with error %" PRIi32 "\n", result);
-        CY_ASSERT(0);
-    }
-
-    result = radar_config_optimizer_set_operational_mode(default_config.mode);
-
-    if(result != ESTATUS_SUCCESS)
-    {
-        printf("[MSG] ERROR: radar_config_optimizer_set_operational_mode failed with error %" PRIi32 "\n", result);
-        CY_ASSERT(0);
-    }
-
-    if (xTaskCreate(console_task, CLI_TASK_NAME, CLI_TASK_STACK_SIZE, handle, CLI_TASK_PRIORITY, NULL) != pdPASS)
-    {
-        CY_ASSERT(0);
-    }
-
-    for(;;)
-    {
-        /* Wait for frame data available to process */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        xensiv_radar_presence_process_frame(handle, avg_chirp, xTaskGetTickCount() * portTICK_PERIOD_MS);
-        process_verbose_cmd(handle, xTaskGetTickCount() * portTICK_PERIOD_MS);
-    }
-}
-
-
-/*******************************************************************************
-* Function Name: presence_detection_cb
-********************************************************************************
-* Summary:
-* This is the callback function o indicate presence/absence events on terminal 
-* and LEDs.
-* Parameters:
-*  void
-*
-* Return:
-*  None
-*
-*******************************************************************************/
-void presence_detection_cb(xensiv_radar_presence_handle_t handle,
-                           const xensiv_radar_presence_event_t* event,
-                           void *data)
-{
-    (void)handle;
-    (void)data;
-
-    if (!ce_app_state.verbose)
-    {
-        switch (event->state)
-        {
-            case XENSIV_RADAR_PRESENCE_STATE_MACRO_PRESENCE:
-                cyhal_gpio_write(USER_LED1, true);
-                cyhal_gpio_write(USER_LED2, false);
-                printf("[INFO] macro presence %" PRIi32 " %" PRIi32 "\n",
-                        event->range_bin,
-                        event->timestamp);
-                break;
-
-            case XENSIV_RADAR_PRESENCE_STATE_MICRO_PRESENCE:
-                cyhal_gpio_write(USER_LED1, true);
-                cyhal_gpio_write(USER_LED2, false);
-                printf("[INFO] micro presence %" PRIi32 " %" PRIi32 "\n",
-                        event->range_bin,
-                        event->timestamp);
-                break;
-
-            case XENSIV_RADAR_PRESENCE_STATE_ABSENCE:
-                printf("[INFO] absence %" PRIu32 "\n", event->timestamp);
-                cyhal_gpio_write(USER_LED1, false);
-                cyhal_gpio_write(USER_LED2, true);
-                break;
-
-            default:
-                printf("[MSG] ERROR: Unknown reported state in event handling\n");
-                break;
-        }
-
-    }
-
-    /* save the last reported event state */
-    ce_app_state.last_reported_event = *event;
-}
-
-
-/*******************************************************************************
-* Function Name: init_sensor
-********************************************************************************
-* Summary:
-* This function configures the SPI interface, initializes radar and interrupt
-* service routine to indicate the availability of radar data. 
-* 
-* Parameters:
-*  void
-*
-* Return:
-*  Success or error 
-*
-*******************************************************************************/
-static int32_t init_sensor(void)
-{
-    if (cyhal_spi_init(&spi_obj,
-                       PIN_XENSIV_BGT60TRXX_SPI_MOSI,
-                       PIN_XENSIV_BGT60TRXX_SPI_MISO,
-                       PIN_XENSIV_BGT60TRXX_SPI_SCLK,
-                       NC,
-                       NULL,
-                       8,
-                       CYHAL_SPI_MODE_00_MSB,
-                       false) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: cyhal_spi_init failed\n");
-        return -1;
-    }
-
-    /* Reduce drive strength to improve EMI */
-    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_SLEW_FAST);
-    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_MOSI), CY_GPIO_DRIVE_1_8);
-    Cy_GPIO_SetSlewRate(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_SLEW_FAST);
-    Cy_GPIO_SetDriveSel(CYHAL_GET_PORTADDR(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CYHAL_GET_PIN(PIN_XENSIV_BGT60TRXX_SPI_SCLK), CY_GPIO_DRIVE_1_8);
-
-    /* Set the data rate to 25 Mbps */
-    if (cyhal_spi_set_frequency(&spi_obj, XENSIV_BGT60TRXX_SPI_FREQUENCY) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: cyhal_spi_set_frequency failed\n");
-        return -1;
-    }
-
-#if defined (TARGET_APP_CYSBSYSKIT_DEV_01) || (TARGET_APP_KIT_BGT60TR13C_EMBEDD)
-    /* Enable LDO */
-    if (cyhal_gpio_init(PIN_XENSIV_BGT60TRXX_LDO_EN,
-                        CYHAL_GPIO_DIR_OUTPUT,
-                        CYHAL_GPIO_DRIVE_STRONG,
-                        true) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: LDO_EN cyhal_gpio_init failed\n");
-        return -1;
-    }
-#endif
-
-    /* Wait LDO stable */
-    (void)cyhal_system_delay_ms(5);
-
-    if (xensiv_bgt60trxx_mtb_init(&bgt60_obj, 
-                                  &spi_obj, 
-                                  PIN_XENSIV_BGT60TRXX_SPI_CSN, 
-                                  PIN_XENSIV_BGT60TRXX_RSTN, 
-                                  register_list_micro_only, // default config with macro settings
-                                  XENSIV_BGT60TRXX_CONF_NUM_REGS_MACRO) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: xensiv_bgt60trxx_mtb_init failed\n");
-        return -1;
-    }
-
-    if (xensiv_bgt60trxx_mtb_interrupt_init(&bgt60_obj,
-                                            NUM_SAMPLES_PER_FRAME*2,
-                                            PIN_XENSIV_BGT60TRXX_IRQ,
-                                            GPIO_INTERRUPT_PRIORITY,
-                                            xensiv_bgt60trxx_interrupt_handler,
-                                            NULL) != CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: xensiv_bgt60trxx_mtb_interrupt_init failed\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-
-/*******************************************************************************
-* Function Name: xensiv_bgt60trxx_interrupt_handler
-********************************************************************************
-* Summary:
-* This is the interrupt handler to react on sensor indicating the availability 
-* of new data
-*    1. Notifies main task on interrupt from sensor
-*
-* Parameters:
-*  void
-*
-* Return:
-*  none
-*
-*******************************************************************************/
-#if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
-static void xensiv_bgt60trxx_interrupt_handler(void *args, cyhal_gpio_event_t event)
-#else
-static void xensiv_bgt60trxx_interrupt_handler(void *args, cyhal_gpio_irq_event_t event)
-#endif
-{
-    CY_UNUSED_PARAMETER(args);
-    CY_UNUSED_PARAMETER(event);
-
-    mgr.run(true);
-}
-
-
-/*******************************************************************************
-* Function Name: init_leds
-********************************************************************************
-* Summary:
-* This function initializes the GPIOs for LEDs and set them to off state.
-* Parameters:
-*  void
-*
-* Return:
-*  Success or error
-*
-*******************************************************************************/
-static int32_t init_leds(void)
-{
-    if(cyhal_gpio_init(USER_LED1, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, false)!= CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: GPIO initialization for USER_LED1 failed\n");
-        return -1;
-    }
-    if( cyhal_gpio_init(USER_LED2, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, false)!= CY_RSLT_SUCCESS)
-    {
-        printf("[MSG] ERROR: GPIO initialization for USER_LED2 failed\n");
-        return -1;
-    }
-    return 0;
-}
-
-
-/*******************************************************************************
- * Function Name: process_verbose_cmd
- ********************************************************************************
- * Summary:
- * This function processes the prints the desired output on CLI provided
- * user has set the "verbose enabled" through Cli task.
- *
- * Parameters:
- *  void
- *
- * Return:
- *  none
- *
- *******************************************************************************/
-void process_verbose_cmd(xensiv_radar_presence_handle_t handle,
-        XENSIV_RADAR_PRESENCE_TIMESTAMP time_ms)
-{
-  
-    if (ce_app_state.verbose == false)
-    {
-        return;
-    }
-
-    if (ce_app_state.bookmark_timestamp + 1000 <= time_ms)
-    {
-        print_job_locked = true;
-
-        switch (ce_app_state.last_reported_event.state)
-        {
-            case XENSIV_RADAR_PRESENCE_STATE_MACRO_PRESENCE:
-                cyhal_gpio_write(USER_LED1, true);
-                cyhal_gpio_write(USER_LED2, false);
-                printf("[INFO] macro presence %" PRIi32 " %" PRIi32 "\n",
-                        ce_app_state.last_reported_event.range_bin,
-                        time_ms);
-                break;
-
-            case XENSIV_RADAR_PRESENCE_STATE_MICRO_PRESENCE:
-                cyhal_gpio_write(USER_LED1, true);
-                cyhal_gpio_write(USER_LED2, false);
-                printf("[INFO] micro presence %" PRIi32 " %" PRIi32 "\n",
-                        ce_app_state.last_reported_event.range_bin,
-                        time_ms);
-                break;
-
-            case XENSIV_RADAR_PRESENCE_STATE_ABSENCE:
-                cyhal_gpio_write(USER_LED1, false);
-                cyhal_gpio_write(USER_LED2, true);
-                printf("[INFO] absence %" PRIu32 "\n", time_ms);
-                break;
-            default:
-                printf("[MSG] ERROR: Unknown reported state in event handling\n");
-                break;
-        }
-
-
-        ce_app_state.bookmark_timestamp = time_ms;
-
-        print_job_locked = false;
-    }
-}
-
-
-/*******************************************************************************
-* Function Name: timer_callbak
-********************************************************************************
-* Summary:
-* This is the timer_callback which toggles the LED
-*
-* Parameters:
-*  void
-*
-* Return:
-*  none
-*
-*******************************************************************************/
-static void timer_callbak(TimerHandle_t xTimer)
-{
-    (void)xTimer;
-
-#ifdef TARGET_APP_CYSBSYSKIT_DEV_01
-    cyhal_gpio_toggle(CYBSP_USER_LED);
-#endif
-}
-
-/* [] END OF FILE */
-#endif /* Legacy presence-detection application disabled */
-
-#include <inttypes.h>
-#include <stdio.h>
-
-#include "cy_pdl.h"
-#include "cyhal.h"
-#include "cybsp.h"
-#include "cy_retarget_io.h"
-
-#include "FreeRTOS.h"
-#include "task.h"
 
 #include "xensiv_bgt60trxx.h"
 #include "xensiv_bgt60trxx_mtb.h"
@@ -789,14 +21,26 @@ static void timer_callbak(TimerHandle_t xTimer)
 #include "resource_map.h"
 #include "angle_range.h"
 
+extern cyhal_uart_t cy_retarget_io_uart_obj;
+
 #define RADAR_TASK_STACK_SIZE   (configMINIMAL_STACK_SIZE * 16U)
 #define RADAR_TASK_PRIORITY     (tskIDLE_PRIORITY + 2U)
+
+#define COMMAND_TASK_STACK_SIZE (configMINIMAL_STACK_SIZE * 4U)
+#define COMMAND_TASK_PRIORITY   (tskIDLE_PRIORITY + 1U)
+#define RADAR_CMD_QUEUE_LENGTH  (8U)
 
 #define RAW_SAMPLES_PER_FRAME   (XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP * \
                                  XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME * \
                                  XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS * 2U)
 
 #define GPIO_INTERRUPT_PRIORITY (7U)
+
+#if defined(XENSIV_BGT60TRXX_CONF_NUM_REGS_MACRO)
+#define RADAR_REGISTER_COUNT XENSIV_BGT60TRXX_CONF_NUM_REGS_MACRO
+#else
+#define RADAR_REGISTER_COUNT XENSIV_BGT60TRXX_CONF_NUM_REGS
+#endif
 
 static cyhal_spi_t spi_obj;
 static xensiv_bgt60trxx_mtb_t radar_dev;
@@ -805,9 +49,39 @@ static TaskHandle_t radar_task_handle;
 static uint16_t raw_frame[RAW_SAMPLES_PER_FRAME];
 static float32_t frame_buffer[RAW_SAMPLES_PER_FRAME];
 
+typedef enum
+{
+    RADAR_COMMAND_RUN,
+    RADAR_COMMAND_STOP,
+    RADAR_COMMAND_RAW_DATA,
+    RADAR_COMMAND_RAW_STREAM
+} radar_command_type_t;
+
+typedef struct
+{
+    radar_command_type_t type;
+    uint32_t param;
+} radar_command_t;
+
+static QueueHandle_t radar_cmd_queue;
+static bool radar_running;
+static bool raw_streaming;
+static bool raw_stream_resume_tracking;
+static uint32_t raw_stream_frame_count;
+
 static void radar_task(void *arg);
+static void command_task(void *arg);
 static cy_rslt_t init_sensor(void);
 static bool acquire_frame(void);
+static void handle_command(const radar_command_t *cmd);
+static size_t read_line(char *buffer, size_t length);
+static void clear_frame_notifications(void);
+static cy_rslt_t radar_start_acquisition(void);
+static cy_rslt_t radar_stop_acquisition(void);
+static bool process_raw_data(uint32_t frame_count);
+static bool raw_stream_start(void);
+static bool raw_stream_stop(void);
+static void print_raw_frame_structured(uint32_t frame_number);
 
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
 static void radar_irq_handler(void *args, cyhal_gpio_event_t event);
@@ -827,8 +101,33 @@ int main(void)
 
     __enable_irq();
 
-    cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
-    printf("\r\nXENSIV 60GHz Radar AoA demo\r\n");
+    if (cy_retarget_io_init(CYBSP_DEBUG_UART_TX,
+                            CYBSP_DEBUG_UART_RX,
+                            CY_RETARGET_IO_BAUDRATE) != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    printf("\r\n========================================\r\n");
+    printf("XENSIV 60GHz Radar Human Tracking Demo\r\n");
+    printf("========================================\r\n");
+    printf("Device: BGT60TR13C\r\n");
+    printf("Detection Range: 0.3m to 5.0m\r\n");
+    printf("Antenna Config:\r\n");
+    printf("  - RX1 + RX3: X-axis (Azimuth)\r\n");
+    printf("  - RX2 + RX3: Y-axis (Elevation)\r\n");
+    printf("========================================\r\n\r\n");
+    fflush(stdout);
+
+    radar_cmd_queue = xQueueCreate(RADAR_CMD_QUEUE_LENGTH, sizeof(radar_command_t));
+    if (radar_cmd_queue == NULL)
+    {
+        printf("[ERR] Failed to create command queue\r\n");
+        CY_ASSERT(0);
+    }
 
     if (xTaskCreate(radar_task,
                     "radar",
@@ -838,6 +137,17 @@ int main(void)
                     &radar_task_handle) != pdPASS)
     {
         printf("[ERR] Failed to create radar task\r\n");
+        CY_ASSERT(0);
+    }
+
+    if (xTaskCreate(command_task,
+                    "cli",
+                    COMMAND_TASK_STACK_SIZE,
+                    NULL,
+                    COMMAND_TASK_PRIORITY,
+                    NULL) != pdPASS)
+    {
+        printf("[ERR] Failed to create command task\r\n");
         CY_ASSERT(0);
     }
 
@@ -860,15 +170,45 @@ static void radar_task(void *arg)
         CY_ASSERT(0);
     }
 
-    printf("Radar ready. Streaming range and angles.\r\n");
+    printf("Radar initialized successfully!\r\n");
+    printf("System idle. Type 'run' to start tracking.\r\n\r\n");
+    fflush(stdout);
 
     for (;;)
     {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        radar_command_t cmd;
+        TickType_t wait_ticks = (radar_running || raw_streaming) ? 0U : portMAX_DELAY;
+
+        if (xQueueReceive(radar_cmd_queue, &cmd, wait_ticks) == pdPASS)
+        {
+            handle_command(&cmd);
+            continue;
+        }
+
+        if (!radar_running && !raw_streaming)
+        {
+            ulTaskNotifyTake(pdTRUE, 0U);
+            vTaskDelay(pdMS_TO_TICKS(10U));
+            continue;
+        }
+
+        TickType_t notify_timeout = raw_streaming ? pdMS_TO_TICKS(1000U) : pdMS_TO_TICKS(100U);
+
+        if (ulTaskNotifyTake(pdTRUE, notify_timeout) == 0U)
+        {
+            continue;
+        }
 
         if (!acquire_frame())
         {
             printf("[WARN] Failed to read frame\r\n");
+            continue;
+        }
+
+        if (raw_streaming)
+        {
+            uint32_t frame_number = ++raw_stream_frame_count;
+            print_raw_frame_structured(frame_number);
             continue;
         }
 
@@ -877,10 +217,6 @@ static void radar_task(void *arg)
         if (angle_range_compute(frame_buffer, &result))
         {
             angle_range_print(&result, true);
-        }
-        else
-        {
-            printf("[INFO] No dominant target detected\r\n");
         }
     }
 }
@@ -935,7 +271,7 @@ static cy_rslt_t init_sensor(void)
                                                PIN_XENSIV_BGT60TRXX_SPI_CSN,
                                                PIN_XENSIV_BGT60TRXX_RSTN,
                                                register_list_macro_only,
-                                               XENSIV_BGT60TRXX_CONF_NUM_REGS_MACRO);
+                                               RADAR_REGISTER_COUNT);
     if (rslt != CY_RSLT_SUCCESS)
     {
         return rslt;
@@ -958,11 +294,6 @@ static cy_rslt_t init_sensor(void)
         return rslt;
     }
 
-    if (xensiv_bgt60trxx_start_frame(&radar_dev.dev, true) != CY_RSLT_SUCCESS)
-    {
-        return CY_RSLT_TYPE_ERROR;
-    }
-
     return CY_RSLT_SUCCESS;
 }
 
@@ -981,6 +312,515 @@ static bool acquire_frame(void)
     }
 
     return true;
+}
+
+static void handle_command(const radar_command_t *cmd)
+{
+    switch (cmd->type)
+    {
+        case RADAR_COMMAND_RUN:
+        {
+            if (radar_running)
+            {
+                printf("[CMD] Radar already running\r\n");
+                break;
+            }
+
+            cy_rslt_t rslt = radar_start_acquisition();
+            if (rslt == CY_RSLT_SUCCESS)
+            {
+                radar_running = true;
+                printf("[CMD] Radar started\r\n");
+            }
+            else
+            {
+                printf("[ERR] Radar start failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            }
+            break;
+        }
+
+        case RADAR_COMMAND_STOP:
+        {
+            if (!radar_running)
+            {
+                printf("[CMD] Radar already stopped\r\n");
+                break;
+            }
+
+            cy_rslt_t rslt = radar_stop_acquisition();
+            if (rslt == CY_RSLT_SUCCESS)
+            {
+                radar_running = false;
+                printf("[CMD] Radar stopped\r\n");
+            }
+            else
+            {
+                printf("[ERR] Radar stop failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            }
+            break;
+        }
+
+        case RADAR_COMMAND_RAW_DATA:
+        {
+            if (cmd->param == 0U)
+            {
+                printf("[ERR] raw_data requires frame count > 0\r\n");
+                break;
+            }
+
+            (void)process_raw_data(cmd->param);
+            break;
+        }
+
+        case RADAR_COMMAND_RAW_STREAM:
+        {
+            if (cmd->param != 0U)
+            {
+                (void)raw_stream_start();
+            }
+            else
+            {
+                (void)raw_stream_stop();
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static void clear_frame_notifications(void)
+{
+    while (ulTaskNotifyTake(pdTRUE, 0U) > 0U)
+    {
+        /* drain */
+    }
+}
+
+static cy_rslt_t radar_start_acquisition(void)
+{
+    clear_frame_notifications();
+    return xensiv_bgt60trxx_start_frame(&radar_dev.dev, true);
+}
+
+static cy_rslt_t radar_stop_acquisition(void)
+{
+    cy_rslt_t rslt = xensiv_bgt60trxx_start_frame(&radar_dev.dev, false);
+    clear_frame_notifications();
+    return rslt;
+}
+
+static bool process_raw_data(uint32_t frame_count)
+{
+    if (raw_streaming)
+    {
+        printf("[ERR] Raw stream active. Stop raw_stream before capturing frames.\r\n");
+        return false;
+    }
+
+    bool resume = radar_running;
+    cy_rslt_t rslt;
+
+    if (resume)
+    {
+        rslt = radar_stop_acquisition();
+        if (rslt != CY_RSLT_SUCCESS)
+        {
+            printf("[ERR] Failed to pause radar: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            radar_running = false;
+            resume = false;
+        }
+        else
+        {
+            radar_running = false;
+            printf("[CMD] Radar paused for raw capture\r\n");
+        }
+    }
+
+    clear_frame_notifications();
+
+    rslt = xensiv_bgt60trxx_start_frame(&radar_dev.dev, true);
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        printf("[ERR] Raw capture start failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+        if (resume)
+        {
+            rslt = radar_start_acquisition();
+            if (rslt == CY_RSLT_SUCCESS)
+            {
+                radar_running = true;
+                printf("[CMD] Radar resumed\r\n");
+            }
+            else
+            {
+                printf("[ERR] Radar resume failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            }
+        }
+        return false;
+    }
+
+    printf("[CMD] Collecting %lu frame(s) of raw data\r\n", (unsigned long)frame_count);
+
+    bool success = true;
+
+    for (uint32_t frame_idx = 0U; frame_idx < frame_count; ++frame_idx)
+    {
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000U)) == 0U)
+        {
+            printf("[ERR] Raw data capture timeout\r\n");
+            success = false;
+            break;
+        }
+
+        if (!acquire_frame())
+        {
+            printf("[ERR] Raw data capture failed\r\n");
+            success = false;
+            break;
+        }
+
+        printf("[RAW][%lu]", (unsigned long)frame_idx);
+        for (uint32_t i = 0U; i < RAW_SAMPLES_PER_FRAME; ++i)
+        {
+            printf(" %.4f", frame_buffer[i]);
+        }
+        printf("\r\n");
+    }
+
+    rslt = xensiv_bgt60trxx_start_frame(&radar_dev.dev, false);
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        printf("[ERR] Raw capture stop failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+        success = false;
+    }
+
+    clear_frame_notifications();
+
+    if (resume)
+    {
+        rslt = radar_start_acquisition();
+        if (rslt == CY_RSLT_SUCCESS)
+        {
+            radar_running = true;
+            printf("[CMD] Radar resumed\r\n");
+        }
+        else
+        {
+            printf("[ERR] Radar resume failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            radar_running = false;
+            success = false;
+        }
+    }
+
+    if (success)
+    {
+        printf("[CMD] Raw capture complete\r\n");
+    }
+
+    return success;
+}
+
+static bool raw_stream_start(void)
+{
+    if (raw_streaming)
+    {
+        printf("[CMD] Raw stream already active\r\n");
+        return true;
+    }
+
+    raw_stream_resume_tracking = radar_running;
+
+    if (radar_running)
+    {
+        cy_rslt_t rslt = radar_stop_acquisition();
+        if (rslt != CY_RSLT_SUCCESS)
+        {
+            printf("[ERR] Failed to pause radar: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            radar_running = false;
+            raw_stream_resume_tracking = false;
+            return false;
+        }
+
+        radar_running = false;
+        printf("[CMD] Radar paused for raw stream\r\n");
+    }
+
+    cy_rslt_t rslt = radar_start_acquisition();
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        printf("[ERR] Raw stream start failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+
+        if (raw_stream_resume_tracking)
+        {
+            rslt = radar_start_acquisition();
+            if (rslt == CY_RSLT_SUCCESS)
+            {
+                radar_running = true;
+                printf("[CMD] Radar resumed\r\n");
+            }
+            else
+            {
+                printf("[ERR] Radar resume failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+                radar_running = false;
+            }
+        }
+
+        raw_stream_resume_tracking = false;
+        return false;
+    }
+
+    raw_stream_frame_count = 0U;
+    raw_streaming = true;
+    printf("[CMD] Raw stream started. Use 'raw_stream stop' to exit.\r\n");
+
+    return true;
+}
+
+static bool raw_stream_stop(void)
+{
+    if (!raw_streaming)
+    {
+        printf("[CMD] Raw stream not active\r\n");
+        return true;
+    }
+
+    cy_rslt_t rslt = radar_stop_acquisition();
+    if (rslt != CY_RSLT_SUCCESS)
+    {
+        printf("[ERR] Raw stream stop failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+        return false;
+    }
+
+    raw_streaming = false;
+    raw_stream_frame_count = 0U;
+    printf("[CMD] Raw stream stopped\r\n");
+
+    clear_frame_notifications();
+
+    if (raw_stream_resume_tracking)
+    {
+        rslt = radar_start_acquisition();
+        if (rslt == CY_RSLT_SUCCESS)
+        {
+            radar_running = true;
+            printf("[CMD] Radar resumed\r\n");
+        }
+        else
+        {
+            printf("[ERR] Radar resume failed: 0x%08" PRIX32 "\r\n", (uint32_t)rslt);
+            radar_running = false;
+            raw_stream_resume_tracking = false;
+            return false;
+        }
+    }
+
+    raw_stream_resume_tracking = false;
+    return true;
+}
+
+static void print_raw_frame_structured(uint32_t frame_number)
+{
+    const uint32_t chirps_per_frame = XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME;
+    const uint32_t samples_per_chirp = XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP;
+    const uint32_t rx_antennas = XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS;
+
+    printf("Frame %lu:\r\n", (unsigned long)frame_number);
+
+    for (uint32_t chirp = 0U; chirp < chirps_per_frame; ++chirp)
+    {
+        printf("  Chirp %lu:\r\n", (unsigned long)(chirp + 1U));
+
+        for (uint32_t rx = 0U; rx < rx_antennas; ++rx)
+        {
+            printf("    RX%lu:\r\n", (unsigned long)(rx + 1U));
+
+            for (uint32_t sample = 0U; sample < samples_per_chirp; ++sample)
+            {
+                uint32_t base = (chirp * rx_antennas * samples_per_chirp * 2U) +
+                                (rx * samples_per_chirp * 2U) +
+                                (sample * 2U);
+                int16_t i_val = (int16_t)raw_frame[base];
+                int16_t q_val = (int16_t)raw_frame[base + 1U];
+
+                printf("      %3lu: I=%6d Q=%6d\r\n",
+                       (unsigned long)(sample + 1U),
+                       (int)i_val,
+                       (int)q_val);
+            }
+        }
+    }
+
+    printf("\r\n");
+    fflush(stdout);
+}
+
+static size_t read_line(char *buffer, size_t length)
+{
+    size_t idx = 0U;
+
+    if ((buffer == NULL) || (length == 0U))
+    {
+        return 0U;
+    }
+
+    for (;;)
+    {
+        uint8_t ch = 0U;
+        cy_rslt_t rslt = cyhal_uart_getc(&cy_retarget_io_uart_obj, &ch, 10U);
+
+        if (rslt == CY_RSLT_ERR_CSP_UART_GETC_TIMEOUT)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1U));
+            continue;
+        }
+
+        if (rslt != CY_RSLT_SUCCESS)
+        {
+            vTaskDelay(pdMS_TO_TICKS(5U));
+            continue;
+        }
+
+        if ((ch == '\r') || (ch == '\n'))
+        {
+            printf("\r\n");
+            break;
+        }
+
+        if ((ch == '\b') || (ch == 0x7FU))
+        {
+            if (idx > 0U)
+            {
+                --idx;
+                printf("\b \b");
+            }
+            continue;
+        }
+
+        if (idx < (length - 1U))
+        {
+            buffer[idx++] = (char)ch;
+            putchar((int)ch);
+        }
+    }
+
+    buffer[idx] = '\0';
+    return idx;
+}
+
+static void command_task(void *arg)
+{
+    (void)arg;
+
+    char line_buffer[64];
+
+    printf("Available commands: run, stop, raw_data <frames>, raw_stream <start|stop>, help\r\n");
+    fflush(stdout);
+
+    for (;;)
+    {
+        printf("> ");
+        fflush(stdout);
+
+        if (read_line(line_buffer, sizeof(line_buffer)) == 0U)
+        {
+            continue;
+        }
+
+        char *token = strtok(line_buffer, " \t");
+        if (token == NULL)
+        {
+            continue;
+        }
+
+        if (strcmp(token, "run") == 0)
+        {
+            radar_command_t cmd = { RADAR_COMMAND_RUN, 0U };
+            if (xQueueSend(radar_cmd_queue, &cmd, pdMS_TO_TICKS(100U)) != pdPASS)
+            {
+                printf("[ERR] Failed to queue run command\r\n");
+            }
+        }
+        else if (strcmp(token, "stop") == 0)
+        {
+            radar_command_t cmd = { RADAR_COMMAND_STOP, 0U };
+            if (xQueueSend(radar_cmd_queue, &cmd, pdMS_TO_TICKS(100U)) != pdPASS)
+            {
+                printf("[ERR] Failed to queue stop command\r\n");
+            }
+        }
+        else if (strcmp(token, "raw_data") == 0)
+        {
+            char *arg_frames = strtok(NULL, " \t");
+            if (arg_frames == NULL)
+            {
+                printf("Usage: raw_data <frames>\r\n");
+                continue;
+            }
+
+            char *endptr = NULL;
+            unsigned long frames = strtoul(arg_frames, &endptr, 10);
+            if ((endptr == arg_frames) || ((endptr != NULL) && (*endptr != '\0')))
+            {
+                printf("[ERR] Invalid frame count\r\n");
+                continue;
+            }
+
+            if (frames == 0UL)
+            {
+                printf("[ERR] Frame count must be greater than zero\r\n");
+                continue;
+            }
+
+            radar_command_t cmd = { RADAR_COMMAND_RAW_DATA, (uint32_t)frames };
+            if (xQueueSend(radar_cmd_queue, &cmd, pdMS_TO_TICKS(100U)) != pdPASS)
+            {
+                printf("[ERR] Failed to queue raw_data command\r\n");
+            }
+        }
+        else if (strcmp(token, "raw_stream") == 0)
+        {
+            char *arg_mode = strtok(NULL, " \t");
+            if (arg_mode == NULL)
+            {
+                printf("Usage: raw_stream <start|stop>\r\n");
+                continue;
+            }
+
+            radar_command_t cmd = { RADAR_COMMAND_RAW_STREAM, 0U };
+
+            if (strcmp(arg_mode, "start") == 0)
+            {
+                cmd.param = 1U;
+            }
+            else if (strcmp(arg_mode, "stop") == 0)
+            {
+                cmd.param = 0U;
+            }
+            else
+            {
+                printf("[ERR] raw_stream expects 'start' or 'stop'\r\n");
+                continue;
+            }
+
+            if (xQueueSend(radar_cmd_queue, &cmd, pdMS_TO_TICKS(100U)) != pdPASS)
+            {
+                printf("[ERR] Failed to queue raw_stream command\r\n");
+            }
+        }
+        else if (strcmp(token, "help") == 0)
+        {
+            printf("Commands:\r\n");
+            printf("  run                - start automatic tracking\r\n");
+            printf("  stop               - halt automatic tracking\r\n");
+            printf("  raw_data <frames>  - dump raw samples\r\n");
+            printf("  raw_stream <start|stop> - continuously stream structured raw data\r\n");
+        }
+        else
+        {
+            printf("[ERR] Unknown command\r\n");
+        }
+    }
 }
 
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
