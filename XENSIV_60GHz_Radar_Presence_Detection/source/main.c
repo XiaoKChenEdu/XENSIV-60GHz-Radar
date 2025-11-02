@@ -647,8 +647,17 @@ static void print_raw_frame_structured(uint32_t frame_number)
                        (unsigned long)(sample + 1U),
                        (int)i_val,
                        (int)q_val);
+
+                if ((sample & 0x0FU) == 0x0FU)
+                {
+                    vTaskDelay(pdMS_TO_TICKS(1U));
+                }
             }
+
+            vTaskDelay(pdMS_TO_TICKS(1U));
         }
+
+        vTaskDelay(pdMS_TO_TICKS(1U));
     }
 
     printf("\r\n");
