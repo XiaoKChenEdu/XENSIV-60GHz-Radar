@@ -98,7 +98,7 @@ SOURCES=
 
 # Like SOURCES, but for include directories. Value should be paths to
 # directories (without a leading -I).
-INCLUDES+=src
+INCLUDES=
 
 # Add additional defines to the build process (without a leading -D).
 DEFINES=
@@ -147,7 +147,10 @@ POSTBUILD=
 # Relative path to the project directory (default is the Makefile's directory).
 #
 # This controls where automatic source code discovery looks for code.
-CY_APP_PATH=src
+CY_APP_PATH=
+
+# Exclude folders and files from auto-discovery.
+# CY_IGNORE+=reference
 
 # Relative path to the shared repo location.
 #
