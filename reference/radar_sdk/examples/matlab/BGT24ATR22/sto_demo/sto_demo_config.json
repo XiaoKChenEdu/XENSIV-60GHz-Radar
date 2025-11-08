@@ -1,0 +1,95 @@
+{
+    "device_config": {
+        "afc_config": {
+            "afc_duration_ct": 115,
+            "afc_period": 16,
+            "afc_repeat_count_index": 0,
+            "afc_threshold_course": 10,
+            "afc_threshold_fine": 3,
+            "band_index": 0,
+            "rf_center_frequency_hz": 24200000000
+        },
+        "clock_config": {
+            "clock_enabled": false,
+            "clock_frequency_hz": 38400000,
+            "hf_on_time_usec": 10,
+            "reference_clock_Hz": 38400000,
+            "sys_clk_to_i2c": false,
+            "system_clock_div_flex": false,
+            "system_clock_divider": 0
+        },
+        "frame_config": [
+            {
+                "frame_repetition_time_s": 0.05000000074505806,
+                "num_samples": 32,
+                "pulse_repetition_time_s": 0.0012000000569969416,
+                "selected_pulse_configs": [
+                    1,
+                    2
+                ]
+            },
+            {
+                "frame_repetition_time_s": 0,
+                "num_samples": 0,
+                "pulse_repetition_time_s": 0,
+                "selected_pulse_configs": [
+                ]
+            }
+        ],
+        "pulse_config": [
+            {
+                "abb_gain_index": 7,
+                "aoc_index": 2,
+                "rx_antennas": [
+                    1
+                ],
+                "tx_antennas": [
+                    1
+                ],
+                "tx_power_level": 63
+            },
+            {
+                "abb_gain_index": 7,
+                "aoc_index": 2,
+                "rx_antennas": [
+                    2
+                ],
+                "tx_antennas": [
+                    2
+                ],
+                "tx_power_level": 63
+            },
+            {
+                "abb_gain_index": 7,
+                "aoc_index": 2,
+                "rx_antennas": [
+                    2
+                ],
+                "tx_antennas": [
+                    1
+                ],
+                "tx_power_level": 50
+            },
+            {
+                "abb_gain_index": 7,
+                "aoc_index": 2,
+                "rx_antennas": [
+                    1
+                ],
+                "tx_antennas": [
+                    2
+                ],
+                "tx_power_level": 50
+            }
+        ]
+    },
+    "device_info": {
+        "baseboard_name": "CY8KIT-149",
+        "device_name": "BGT24ATR22",
+        "firmware_version": "2.10.70"
+    },
+    "json_version": {
+        "type": "BGT24ATR22",
+        "version": "4.0.0"
+    }
+}

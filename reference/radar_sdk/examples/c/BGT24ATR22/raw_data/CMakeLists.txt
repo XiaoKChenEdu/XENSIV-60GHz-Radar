@@ -1,0 +1,2 @@
+add_executable(BGT24ATR22_raw_data raw_data.c frame_configuration.h read_configuration.cpp)
+target_link_libraries(BGT24ATR22_raw_data sdk_mimose nlohmann_json)
