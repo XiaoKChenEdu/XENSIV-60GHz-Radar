@@ -1,0 +1,2 @@
+add_executable(BGT60LTR11AIP_raw_data raw_data.c)
+target_link_libraries(BGT60LTR11AIP_raw_data sdk_ltr11)

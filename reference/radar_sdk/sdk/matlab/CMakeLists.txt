@@ -1,0 +1,12 @@
+if(NOT APPLE)
+    find_package(Matlab 9.9)
+
+    if(NOT Matlab_FOUND)
+        message(STATUS "Matlab not found: Cannot build Matlab wrappers")
+    else()
+        add_subdirectory(RadarSDKMEXWrapper)
+        add_subdirectory(MimoseSDKMEXWrapper)
+    endif()
+else()
+    message(STATUS "Skipping SDK MATLAB wrapper build for macOS")
+endif()

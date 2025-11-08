@@ -1,0 +1,28 @@
+var searchData=
+[
+  ['cabs_48',['CABS',['../_defines_8h.html#ac6945cb7d2db8f89f9eac901caa7d67a',1,'Defines.h']]],
+  ['ceil_49',['CEIL',['../_defines_8h.html#ae942a914db9767fa4fde805a268004e0',1,'Defines.h']]],
+  ['center_5ffrequency_5fhz_50',['center_frequency_Hz',['../structifx___fmcw___metrics__t.html#a175b44911577c99867f3c893e6c00ea1',1,'ifx_Fmcw_Metrics_t::center_frequency_Hz()'],['../structifx___segmentation___config__t.html#a175b44911577c99867f3c893e6c00ea1',1,'ifx_Segmentation_Config_t::center_frequency_Hz()']]],
+  ['channel_51',['channel',['../structifx___mimose___pulse___config__t.html#a2d8526192ea1135090ee2235b6a7b6a0',1,'ifx_Mimose_Pulse_Config_t']]],
+  ['chirp_52',['chirp',['../structifx___fmcw___sequence___element.html#a1cab1bc98300f5410dde31a89f124822',1,'ifx_Fmcw_Sequence_Element::chirp()'],['../structifx___fmcw___simple___sequence___config.html#a1cab1bc98300f5410dde31a89f124822',1,'ifx_Fmcw_Simple_Sequence_Config::chirp()']]],
+  ['chirp_5frepetition_5ftime_5fs_53',['chirp_repetition_time_s',['../structifx___avian___config__t.html#ae31cf0039fc80aba041538c1195bfab8',1,'ifx_Avian_Config_t::chirp_repetition_time_s()'],['../structifx___fmcw___simple___sequence___config.html#ae31cf0039fc80aba041538c1195bfab8',1,'ifx_Fmcw_Simple_Sequence_Config::chirp_repetition_time_s()']]],
+  ['chirps_5fper_5fframe_54',['chirps_per_frame',['../structifx___angle_capon___config__t.html#a7811596d04bfe2e20020efb1c577cf8a',1,'ifx_AngleCapon_Config_t::chirps_per_frame()'],['../structifx___doppler_spectrogram___config__t.html#aa73e38fa17939268fbdf3d24b40c23d4',1,'ifx_DopplerSpectrogram_Config_t::chirps_per_frame()'],['../structifx___r_a_i___opt___config__s.html#aa73e38fa17939268fbdf3d24b40c23d4',1,'ifx_RAI_Opt_Config_s::chirps_per_frame()']]],
+  ['cimag_55',['CIMAG',['../_defines_8h.html#a4b305e7c9cd60987bfcd8d953c19687c',1,'Defines.h']]],
+  ['clock_5fconfig_56',['clock_config',['../structifx___mimose___config__t.html#afa67b0538b12bafca414c1a698b6e4a2',1,'ifx_Mimose_Config_t']]],
+  ['coarse_5fscalar_57',['coarse_scalar',['../structifx___o_s_c_f_a_r___config__t.html#ae7d406d0f7d8db0ec557f00102f97309',1,'ifx_OSCFAR_Config_t']]],
+  ['com_5ft_58',['com_t',['../_c_o_m_port_8h.html#a5c4a00ad7ac4fa1a8474552e1c5512c5',1,'COMPort.h']]],
+  ['complex_59',['Complex',['../group__gr__complex.html',1,'']]],
+  ['complex_2eh_60',['Complex.h',['../_complex_8h.html',1,'']]],
+  ['comport_20_28ifxcomport_29_61',['COMPort (ifxComPort)',['../group__gr__cat___s_d_k__comport.html',1,'']]],
+  ['comport_2eh_62',['COMPort.h',['../_c_o_m_port_8h.html',1,'']]],
+  ['continuous_20wave_20control_20_28ifxcw_29_63',['Continuous Wave Control (ifxCw)',['../group__gr__cat___cw.html',1,'']]],
+  ['coords_64',['coords',['../structifx___target__t.html#a69541b3b3c9a0341bf19de28b465a528',1,'ifx_Target_t']]],
+  ['copysign_65',['COPYSIGN',['../_defines_8h.html#a0b7f77e2473eb96891b0508e286c6d4e',1,'Defines.h']]],
+  ['cos_66',['COS',['../_defines_8h.html#af1af2de870caad797b91210f0fc6fe78',1,'Defines.h']]],
+  ['cosh_67',['COSH',['../_defines_8h.html#a06122bdfd04092936fac23f4de42d468',1,'Defines.h']]],
+  ['creal_68',['CREAL',['../_defines_8h.html#aadc886cc580025d6849ac82b0a8f7cf5',1,'Defines.h']]],
+  ['cube_69',['Cube',['../group__gr__cube.html',1,'']]],
+  ['cube_2eh_70',['Cube.h',['../_cube_8h.html',1,'']]],
+  ['cubes_71',['cubes',['../structifx___fmcw___frame__s.html#a3f41779326ebc074972a8bbc0d90bd8b',1,'ifx_Fmcw_Frame_s']]],
+  ['cw_20device_20control_72',['CW Device Control',['../group__gr__devicecw.html',1,'']]]
+];

@@ -1,0 +1,2 @@
+add_executable(BGT60UTR11AIP_raw_data_fmcw raw_data.c)
+target_link_libraries(BGT60UTR11AIP_raw_data_fmcw sdk_fmcw)
