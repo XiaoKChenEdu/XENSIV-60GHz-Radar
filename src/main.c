@@ -1,5 +1,7 @@
 #include <inttypes.h>
 #include <limits.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "cyhal.h"
@@ -33,6 +35,18 @@
                                              XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME *\
                                              XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP)
 
+#define BINARY_FRAME_HEADER_VERSION         (1U)
+#define BINARY_FRAME_SAMPLE_SIZE_BYTES      ((uint16_t)sizeof(uint16_t))
+
+typedef struct __attribute__((packed))
+{
+    uint8_t magic[4];
+    uint16_t version;
+    uint16_t sample_size_bytes;
+    uint32_t frame_index;
+    uint32_t sample_count;
+} binary_frame_header_t;
+
 /*******************************************************************************
 * Global variables
 *******************************************************************************/
@@ -43,6 +57,7 @@ static bool capture_enabled = false;
 static bool frame_limit_enabled = false;
 static uint32_t frame_limit_total = 0U;
 static uint32_t frame_limit_sent = 0U;
+static bool binary_stream_active = false;
 
 /* Allocate enough memory for the radar dara frame. */
 static uint16_t samples[NUM_SAMPLES_PER_FRAME];
@@ -50,6 +65,58 @@ static uint16_t samples[NUM_SAMPLES_PER_FRAME];
 static bool parse_frame_count_argument(const char *arg, uint32_t *out_value);
 static void handle_command(const char *cmd);
 static void process_cli(void);
+static void send_frame_binary(uint32_t frame_idx);
+static void status_printf(const char *fmt, ...);
+
+static void status_printf(const char *fmt, ...)
+{
+    if (fmt == NULL)
+    {
+        return;
+    }
+
+    if (binary_stream_active)
+    {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    fflush(stdout);
+}
+
+static void send_frame_binary(uint32_t frame_idx)
+{
+    const binary_frame_header_t header = {
+        .magic = {'R', 'A', 'D', 'R'},
+        .version = BINARY_FRAME_HEADER_VERSION,
+        .sample_size_bytes = BINARY_FRAME_SAMPLE_SIZE_BYTES,
+        .frame_index = frame_idx,
+        .sample_count = NUM_SAMPLES_PER_FRAME
+    };
+
+    if (fwrite(&header, sizeof(header), 1U, stdout) != 1U)
+    {
+        binary_stream_active = false;
+        capture_enabled = false;
+        frame_limit_enabled = false;
+        status_printf("Failed to write frame header.\r\n");
+        return;
+    }
+
+    if (fwrite(samples, sizeof(samples[0]), NUM_SAMPLES_PER_FRAME, stdout) != NUM_SAMPLES_PER_FRAME)
+    {
+        binary_stream_active = false;
+        capture_enabled = false;
+        frame_limit_enabled = false;
+        status_printf("Failed to write frame payload.\r\n");
+        return;
+    }
+
+    fflush(stdout);
+}
 
 /* Interrupt handler to react on sensor indicating the availability of new data */
 #if defined(CYHAL_API_VERSION) && (CYHAL_API_VERSION >= 2)
@@ -77,7 +144,10 @@ int main(void)
     result = cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
     CY_ASSERT(result == CY_RSLT_SUCCESS);
 
-    printf("XENSIV BGT60TRxx Example\r\n");
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stdin, NULL, _IONBF, 0);
+
+    status_printf("XENSIV BGT60TRxx Example\r\n");
 
     /* Initialize the SPI interface to BGT60. */
     result = cyhal_spi_init(&cyhal_spi,
@@ -139,7 +209,7 @@ int main(void)
         CY_ASSERT(0);
     }
 
-    printf("Ready. Type 'start' [frames] or 'stop' followed by Enter.\r\n");
+    status_printf("Ready. Type 'start' [frames] or 'stop' followed by Enter.\r\n");
 
     uint32_t frame_idx = 0;
 
@@ -170,30 +240,7 @@ int main(void)
         if (xensiv_bgt60trxx_get_fifo_data(&sensor.dev, samples,
                                            NUM_SAMPLES_PER_FRAME) == XENSIV_BGT60TRXX_STATUS_OK)
         {
-            printf("\r\n========== Frame %" PRIu32 " START ==========%s", frame_idx, "\r\n");
-            
-            /* Print data organized by chirp, with RX antennas interleaved */
-            for (uint32_t chirp = 0; chirp < XENSIV_BGT60TRXX_CONF_NUM_CHIRPS_PER_FRAME; ++chirp)
-            {
-                printf("\r\nChirp %" PRIu32 ":\r\n", chirp + 1U);
-
-                for (uint32_t sample = 0; sample < XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP; ++sample)
-                {
-                    printf("  Sample %" PRIu32 ": [", sample + 1U);
-
-                    for (uint32_t rx = 0; rx < XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS; ++rx)
-                    {
-                        uint32_t idx = (chirp * XENSIV_BGT60TRXX_CONF_NUM_SAMPLES_PER_CHIRP * XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS) +
-                                      (sample * XENSIV_BGT60TRXX_CONF_NUM_RX_ANTENNAS) +
-                                      rx;
-
-                        printf("%s%" PRIu16, (rx == 0U) ? "" : ", ", samples[idx]);
-                    }
-                    printf("]\r\n");
-                }
-            }
-            
-            printf("========== Frame %" PRIu32 " END ==========%s", frame_idx, "\r\n");
+            send_frame_binary(frame_idx);
             frame_idx++;
 
             if (frame_limit_enabled)
@@ -211,13 +258,14 @@ int main(void)
                         frame_limit_enabled = false;
                         frame_limit_total = 0U;
                         frame_limit_sent = 0U;
-                        printf("Capture completed (%" PRIu32 " frame%s).\r\n",
-                               completed_frames,
-                               (completed_frames == 1U) ? "" : "s");
+                        binary_stream_active = false;
+                        status_printf("Capture completed (%" PRIu32 " frame%s).\r\n",
+                                      completed_frames,
+                                      (completed_frames == 1U) ? "" : "s");
                     }
                     else
                     {
-                        printf("Failed to stop capture.\r\n");
+                        status_printf("Failed to stop capture.\r\n");
                     }
                 }
             }
@@ -291,13 +339,13 @@ static void handle_command(const char *cmd)
 
         if (!parse_frame_count_argument(cmd + 5, &requested_frames))
         {
-            printf("Invalid frame count.\r\n");
+            status_printf("Invalid frame count.\r\n");
             return;
         }
 
         if (capture_enabled)
         {
-            printf("Capture already running.\r\n");
+            status_printf("Capture already running.\r\n");
             return;
         }
 
@@ -311,18 +359,20 @@ static void handle_command(const char *cmd)
 
             if (frame_limit_enabled)
             {
-                printf("Capture started (%" PRIu32 " frame%s).\r\n",
-                       requested_frames,
-                       (requested_frames == 1U) ? "" : "s");
+                status_printf("Capture started (%" PRIu32 " frame%s).\r\n",
+                              requested_frames,
+                              (requested_frames == 1U) ? "" : "s");
             }
             else
             {
-                printf("Capture started (continuous).\r\n");
+                status_printf("Capture started (continuous).\r\n");
             }
+
+            binary_stream_active = true;
         }
         else
         {
-            printf("Failed to start capture.\r\n");
+            status_printf("Failed to start capture.\r\n");
         }
     }
     else if ((strncmp(cmd, "stop", 4) == 0) &&
@@ -337,13 +387,13 @@ static void handle_command(const char *cmd)
 
         if (*trailing != '\0')
         {
-            printf("Unknown command: %s\r\n", cmd);
+            status_printf("Unknown command: %s\r\n", cmd);
             return;
         }
 
         if (!capture_enabled)
         {
-            printf("Capture already stopped.\r\n");
+            status_printf("Capture already stopped.\r\n");
             return;
         }
 
@@ -354,16 +404,17 @@ static void handle_command(const char *cmd)
             frame_limit_enabled = false;
             frame_limit_total = 0U;
             frame_limit_sent = 0U;
-            printf("Capture stopped.\r\n");
+            binary_stream_active = false;
+            status_printf("Capture stopped.\r\n");
         }
         else
         {
-            printf("Failed to stop capture.\r\n");
+            status_printf("Failed to stop capture.\r\n");
         }
     }
     else if (*cmd != '\0')
     {
-        printf("Unknown command: %s\r\n", cmd);
+        status_printf("Unknown command: %s\r\n", cmd);
     }
 }
 
